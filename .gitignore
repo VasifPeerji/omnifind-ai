@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+*.egg
+*.log
+
+# Virtual environments
+venv/
+.env
+.venv/
+env/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Data & models
+data/*
+!data/sample_products.json   # keep demo file
+models/
+outputs/
+checkpoints/
+
+# OS / Editors
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build / packaging
+dist/
+build/
+
+# Coverage / Testing
+.coverage
+htmlcov/
+.pytest_cache/

@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+streamlit
+requests
+python-multipart
+pillow
+numpy
+pandas
+sentence-transformers
+torch
+faiss-cpu
+pytest
+pydantic
+python-dotenv

@@ -1,0 +1,14 @@
+version: "3.8"
+services:
+  backend:
+    build: ./infra
+    command: uvicorn src.omnifind.api.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+  frontend:
+    build: ./infra
+    command: streamlit run src/omnifind/ui/streamlit_app.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      - "8501:8501"
+    depends_on:
+      - backend
