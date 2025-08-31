@@ -12,3 +12,5 @@ faiss-cpu
 pytest
 pydantic
 python-dotenv
+rapidfuzz
+httpx
