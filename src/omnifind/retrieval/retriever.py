@@ -1,43 +1,111 @@
-from ..embeddings.embedder import Embedder
-from .faiss_index import SimpleIndex
-from ..data.loader import load_sample_catalog
-from ..logger import get_logger
-import numpy as np
+import pickle
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple
 
-logger = get_logger('retriever')
+import numpy as np
+import faiss
+
+EMBED_FILE = Path("data/embeddings/text_embeddings.pkl")
+INDEX_FILE = Path("data/embeddings/faiss_index.index")
 
 class RetrieverService:
-    def __init__(self, model_name=None):
-        self.embedder = Embedder(model_name)
-        self.index = SimpleIndex(dim=384)
-        self.products = {}
-        self._built = False
+    def __init__(self):
+        # Load products + embeddings
+        if not EMBED_FILE.exists():
+            raise FileNotFoundError(f"Embedding file not found: {EMBED_FILE}")
+        with open(EMBED_FILE, "rb") as f:
+            data = pickle.load(f)
+        self.products: List[Dict[str, Any]] = data.get("products", [])
+        self.embeddings = np.array(data.get("embeddings", []), dtype="float32")
+        if self.embeddings.size == 0 or len(self.products) == 0:
+            raise ValueError("Empty products or embeddings.")
 
-    def build_index_from_catalog(self, filename='sample_products.json'):
-        data = load_sample_catalog(filename)
-        if not data:
-            return
-        texts = [p.get('title','') + ' ' + p.get('brand','') for p in data]
-        emb = self.embedder.encode_texts(texts)
-        ids = [p['id'] for p in data]
-        self.products = {p['id']: p for p in data}
-        self.index.add(ids, emb)
-        self.index.build()
-        self._built = True
-        logger.info('Index built with %d products' % len(ids))
+        # Load FAISS index
+        if not INDEX_FILE.exists():
+            raise FileNotFoundError(f"FAISS index not found: {INDEX_FILE}")
+        self.index = faiss.read_index(str(INDEX_FILE))
 
-    def search_text(self, query, top_k=5):
-        if not self._built:
-            self.build_index_from_catalog()
-        vec = self.embedder.encode_texts([query])[0]
-        ids, dists = self.index.search(vec, top_k=top_k)
-        results = [self.products.get(i) for i in ids]
-        return results
+        # Query encoder
+        from sentence_transformers import SentenceTransformer
+        self.model = SentenceTransformer("all-MiniLM-L6-v2")
 
-    def search_image(self, image_bytes, top_k=5):
-        if not self._built:
-            self.build_index_from_catalog()
-        vec = self.embedder.encode_image(image_bytes)
-        ids, dists = self.index.search(vec, top_k=top_k)
-        results = [self.products.get(i) for i in ids]
-        return results
+    # ---------- Public API ----------
+
+    def search_text(
+        self,
+        query: str,
+        top_k: int = 5,
+        filters: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Semantic search + metadata filtering.
+        filters can include:
+          - brand: str or List[str]
+          - category: str or List[str]
+          - price_min: float/int
+          - price_max: float/int
+        """
+        filters = filters or {}
+        candidate_pool = max(top_k * 20, 50)  # pull more to allow filtering/dedup
+
+        # Encode and search
+        q_vec = self.model.encode([query]).astype("float32")
+        D, I = self.index.search(q_vec, candidate_pool)
+
+        # Map indices → products (keep order)
+        candidates = [self.products[i] for i in I[0]]
+
+        # Apply filters
+        candidates = self._apply_filters(candidates, filters)
+
+        # Deduplicate by id (preserve order)
+        unique = []
+        seen = set()
+        for p in candidates:
+            pid = p.get("id")
+            if pid not in seen:
+                unique.append(p)
+                seen.add(pid)
+            if len(unique) >= top_k:
+                break
+
+        return unique
+
+    # ---------- Helpers ----------
+
+    def _apply_filters(self, products: List[Dict[str, Any]], filters: Dict[str, Any]):
+        if not filters:
+            return products
+
+        brand = filters.get("brand")
+        category = filters.get("category")
+        price_min = filters.get("price_min")
+        price_max = filters.get("price_max")
+
+        def norm_list(x):
+            if x is None:
+                return None
+            if isinstance(x, str):
+                return [x.lower()]
+            return [str(v).lower() for v in x]
+
+        brand_list = norm_list(brand)
+        category_list = norm_list(category)
+
+        out = []
+        for p in products:
+            if brand_list:
+                pb = str(p.get("brand", "")).lower()
+                if pb not in brand_list:
+                    continue
+            if category_list:
+                pc = str(p.get("category", "")).lower()
+                if pc not in category_list:
+                    continue
+            price = p.get("price")
+            if price_min is not None and price is not None and price < price_min:
+                continue
+            if price_max is not None and price is not None and price > price_max:
+                continue
+            out.append(p)
+        return out

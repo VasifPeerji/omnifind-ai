@@ -1,15 +1,11 @@
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from omnifind.retrieval.retriever import RetrieverService
-from omnifind.logger import get_logger
+from pydantic import BaseModel, Field
+from typing import Optional, List, Union, Dict, Any
 
-logger = get_logger('api.main')
+from ..retrieval.retriever import RetrieverService
 
-app = FastAPI(
-    title="OmniFind AI API",
-    version="0.1.0",
-    description="Backend API for OmniFind AI - text and image retrieval"
-)
+app = FastAPI(title='OmniFind AI API')
 
 app.add_middleware(
     CORSMiddleware,
@@ -20,17 +16,23 @@ app.add_middleware(
 
 retriever = RetrieverService()
 
+class TextFilters(BaseModel):
+    brand: Optional[Union[str, List[str]]] = None
+    category: Optional[Union[str, List[str]]] = None
+    price_min: Optional[float] = None
+    price_max: Optional[float] = None
+
+class TextSearchRequest(BaseModel):
+    query: str = Field(..., description="Natural language query")
+    top_k: int = 5
+    filters: Optional[TextFilters] = None
+
 @app.get('/')
 def read_root():
     return {'message': 'OmniFind AI backend is running'}
 
 @app.post('/search/text')
-def search_text(query: str):
-    results = retriever.search_text(query, top_k=5)
-    return {'query': query, 'results': results}
-
-@app.post('/search/image')
-async def search_image(file: UploadFile = File(...)):
-    content = await file.read()
-    results = retriever.search_image(content, top_k=5)
-    return {'results': results}
+def search_text(req: TextSearchRequest):
+    filters = req.filters.dict() if req.filters else {}
+    results = retriever.search_text(req.query, top_k=req.top_k, filters=filters)
+    return {'query': req.query, 'results': results}

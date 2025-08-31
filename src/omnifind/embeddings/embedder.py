@@ -1,41 +1,45 @@
-# Lightweight embedder abstraction.
-# Uses sentence-transformers if available, otherwise falls back to a dummy embedder.
+from pathlib import Path
+import json
+import pickle
+from sentence_transformers import SentenceTransformer
 
-import numpy as np
-from ..logger import get_logger
+DATA_FILE = Path("data/sample_products.json")
+EMBED_DIR = Path("data/embeddings")
+EMBED_FILE = EMBED_DIR / "text_embeddings.pkl"
 
-logger = get_logger('embedder')
+def product_semantic_text(p: dict) -> str:
+    """
+    Build the semantic text for embeddings using unstructured fields.
+    Keep structured fields (brand/category/price) for filters, not embeddings.
+    """
+    title = p.get("title", "")
+    desc = p.get("description", "")
+    # You can optionally append color/material if helpful semantically:
+    color = p.get("color")
+    material = p.get("material")
+    extras = []
+    if color: extras.append(color)
+    if material: extras.append(material)
+    extras_text = f" ({', '.join(extras)})" if extras else ""
+    return f"{title}{extras_text}. {desc}".strip()
 
-try:
-    from sentence_transformers import SentenceTransformer
-    _has_sbert = True
-except Exception:
-    _has_sbert = False
+def main():
+    if not DATA_FILE.exists():
+        raise FileNotFoundError(f"Catalog not found: {DATA_FILE}")
+    EMBED_DIR.mkdir(parents=True, exist_ok=True)
 
-class Embedder:
-    def __init__(self, model_name=None):
-        self.model_name = model_name
-        if _has_sbert:
-            model_name = model_name or 'sentence-transformers/all-MiniLM-L6-v2'
-            logger.info(f'Loading SentenceTransformer: {model_name}')
-            self.model = SentenceTransformer(model_name)
-        else:
-            logger.info('sentence-transformers not available, using dummy embedder')
-            self.model = None
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        products = json.load(f)
 
-    def encode_texts(self, texts):
-        if self.model:
-            emb = self.model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
-            return emb
-        # dummy embedding: hash-based vector
-        out = []
-        for t in texts:
-            h = abs(hash(t)) % 1000
-            vec = np.ones(384) * (h / 1000.0)
-            out.append(vec.astype('float32'))
-        return np.stack(out)
+    texts = [product_semantic_text(p) for p in products]
 
-    def encode_image(self, image_bytes):
-        # placeholder: for a real pipeline, load image and compute CLIP embedding
-        logger.info('encode_image called: returning dummy vector')
-        return np.ones(384, dtype='float32')
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+    embeddings = model.encode(texts, show_progress_bar=True)
+
+    with open(EMBED_FILE, "wb") as f:
+        pickle.dump({"products": products, "embeddings": embeddings}, f)
+
+    print(f"Saved {len(products)} embeddings → {EMBED_FILE}")
+
+if __name__ == "__main__":
+    main()
