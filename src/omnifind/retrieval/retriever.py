@@ -1,12 +1,13 @@
 import pickle
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
-
+from typing import Dict, Any, List, Optional
 import numpy as np
 import faiss
+from ..utils.spell_corrector import SpellCorrector
 
 EMBED_FILE = Path("data/embeddings/text_embeddings.pkl")
 INDEX_FILE = Path("data/embeddings/faiss_index.index")
+
 
 class RetrieverService:
     def __init__(self):
@@ -15,6 +16,7 @@ class RetrieverService:
             raise FileNotFoundError(f"Embedding file not found: {EMBED_FILE}")
         with open(EMBED_FILE, "rb") as f:
             data = pickle.load(f)
+
         self.products: List[Dict[str, Any]] = data.get("products", [])
         self.embeddings = np.array(data.get("embeddings", []), dtype="float32")
         if self.embeddings.size == 0 or len(self.products) == 0:
@@ -29,6 +31,19 @@ class RetrieverService:
         from sentence_transformers import SentenceTransformer
         self.model = SentenceTransformer("all-MiniLM-L6-v2")
 
+        # Build vocabulary for spell correction (titles + brands + categories)
+        vocab = set()
+        for p in self.products:
+            if p.get("title"):
+                vocab.update(p["title"].lower().split())
+            if p.get("brand"):
+                vocab.update(p["brand"].lower().split())
+            if p.get("category"):
+                vocab.update(p["category"].lower().split())
+
+        # Initialize spell corrector with catalog vocab
+        self.corrector = SpellCorrector(vocabulary=list(vocab))
+
     # ---------- Public API ----------
 
     def search_text(
@@ -36,9 +51,11 @@ class RetrieverService:
         query: str,
         top_k: int = 5,
         filters: Optional[Dict[str, Any]] = None
-    ) -> List[Dict[str, Any]]:
+    ) -> (List[Dict[str, Any]], str):
         """
         Semantic search + metadata filtering.
+        Returns (results, corrected_query).
+
         filters can include:
           - brand: str or List[str]
           - category: str or List[str]
@@ -47,6 +64,12 @@ class RetrieverService:
         """
         filters = filters or {}
         candidate_pool = max(top_k * 20, 50)  # pull more to allow filtering/dedup
+
+        # ---------- Spell Correction ----------
+        corrected_query = self.corrector.correct_query(query)
+        if corrected_query != query:
+            print(f"[SpellCorrector] '{query}' → '{corrected_query}'")
+        query = corrected_query
 
         # Encode and search
         q_vec = self.model.encode([query]).astype("float32")
@@ -69,7 +92,7 @@ class RetrieverService:
             if len(unique) >= top_k:
                 break
 
-        return unique
+        return unique, corrected_query
 
     # ---------- Helpers ----------
 
@@ -82,12 +105,18 @@ class RetrieverService:
         price_min = filters.get("price_min")
         price_max = filters.get("price_max")
 
-        def norm_list(x):
+        def norm_list(x, do_correct=True):
             if x is None:
                 return None
             if isinstance(x, str):
-                return [x.lower()]
-            return [str(v).lower() for v in x]
+                words = [x.lower()]
+            else:
+                words = [str(v).lower() for v in x]
+
+            # 🔹 Apply spell correction on brand/category tokens too
+            if do_correct:
+                return [self.corrector.correct_word(w).lower() for w in words]
+            return words
 
         brand_list = norm_list(brand)
         category_list = norm_list(category)
