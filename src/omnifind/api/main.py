@@ -35,13 +35,14 @@ def read_root():
 def search_text(req: TextSearchRequest):
     filters = req.filters.dict() if req.filters else {}
 
-    # retriever now returns (results, corrected_query)
-    results, corrected_query = retriever.search_text(
+    # retriever now returns (results, corrected_query, corrected_filters)
+    results, corrected_query, corrected_filters = retriever.search_text(
         req.query, top_k=req.top_k, filters=filters
     )
 
     return {
         "query": req.query,
         "corrected_query": corrected_query,
+        "corrected_filters": corrected_filters,
         "results": results
     }

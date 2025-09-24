@@ -1,16 +1,22 @@
+# retriever.py
 import pickle
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import numpy as np
 import faiss
 from ..utils.spell_corrector import SpellCorrector
+from omnifind.embeddings.preprocess_texts import clean_text
+from sentence_transformers import SentenceTransformer
 
-EMBED_FILE = Path("data/embeddings/text_embeddings.pkl")
-INDEX_FILE = Path("data/embeddings/faiss_index.index")
+BASE_DIR = Path(__file__).parent.parent.parent  
+EMBED_FILE = BASE_DIR / "data/embeddings/text_embeddings.pkl"
+INDEX_FILE = BASE_DIR / "data/embeddings/faiss_index.index"
+
+
 
 
 class RetrieverService:
-    def __init__(self):
+    def __init__(self, model_name: str = "intfloat/e5-large-v2"):
         # Load products + embeddings
         if not EMBED_FILE.exists():
             raise FileNotFoundError(f"Embedding file not found: {EMBED_FILE}")
@@ -28,113 +34,128 @@ class RetrieverService:
         self.index = faiss.read_index(str(INDEX_FILE))
 
         # Query encoder
-        from sentence_transformers import SentenceTransformer
-        self.model = SentenceTransformer("all-MiniLM-L6-v2")
+        self.model = SentenceTransformer(model_name)
 
-        # Build vocabulary for spell correction (titles + brands + categories)
+        # Build vocabulary for spell correction (title + category_name)
         vocab = set()
         for p in self.products:
-            if p.get("title"):
-                vocab.update(p["title"].lower().split())
-            if p.get("brand"):
-                vocab.update(p["brand"].lower().split())
-            if p.get("category"):
-                vocab.update(p["category"].lower().split())
+            for field in ("title", "category_name"):
+                v = p.get(field)
+                if v:
+                    for tok in clean_text(str(v)).split():
+                        vocab.add(tok.strip())
 
-        # Initialize spell corrector with catalog vocab
         self.corrector = SpellCorrector(vocabulary=list(vocab))
 
     # ---------- Public API ----------
-
     def search_text(
         self,
         query: str,
         top_k: int = 5,
         filters: Optional[Dict[str, Any]] = None
-    ) -> (List[Dict[str, Any]], str):
+    ) -> Tuple[List[Dict[str, Any]], str, Dict[str, Any]]:
         """
         Semantic search + metadata filtering.
-        Returns (results, corrected_query).
-
-        filters can include:
-          - brand: str or List[str]
-          - category: str or List[str]
-          - price_min: float/int
-          - price_max: float/int
+        Returns (results, corrected_query, corrected_filters).
         """
         filters = filters or {}
         candidate_pool = max(top_k * 20, 50)  # pull more to allow filtering/dedup
 
-        # ---------- Spell Correction ----------
+        # ---------- Spell Correction (query) ----------
         corrected_query = self.corrector.correct_query(query)
-        if corrected_query != query:
+        if corrected_query != (query or ""):
             print(f"[SpellCorrector] '{query}' → '{corrected_query}'")
-        query = corrected_query
+        query_to_encode = corrected_query
 
         # Encode and search
-        q_vec = self.model.encode([query]).astype("float32")
+        q_vec = self.model.encode([query_to_encode], convert_to_numpy=True).astype("float32")
+        faiss.normalize_L2(q_vec)
         D, I = self.index.search(q_vec, candidate_pool)
 
         # Map indices → products (keep order)
-        candidates = [self.products[i] for i in I[0]]
+        candidates = [self.products[i] for i in I[0] if i != -1]
 
         # Apply filters
-        candidates = self._apply_filters(candidates, filters)
+        candidates, corrected_filters = self._apply_filters(candidates, filters)
 
-        # Deduplicate by id (preserve order)
+        # Deduplicate by asin
         unique = []
         seen = set()
         for p in candidates:
-            pid = p.get("id")
+            pid = p.get("asin")
             if pid not in seen:
                 unique.append(p)
                 seen.add(pid)
             if len(unique) >= top_k:
                 break
 
-        return unique, corrected_query
+        return unique, corrected_query, corrected_filters
 
     # ---------- Helpers ----------
-
     def _apply_filters(self, products: List[Dict[str, Any]], filters: Dict[str, Any]):
         if not filters:
-            return products
+            return products, {}
 
-        brand = filters.get("brand")
-        category = filters.get("category")
+        stars_min = filters.get("stars_min")
+        stars_max = filters.get("stars_max")
         price_min = filters.get("price_min")
         price_max = filters.get("price_max")
+        bestseller = filters.get("isBestSeller")
+        category = filters.get("category_name")
 
-        def norm_list(x, do_correct=True):
-            if x is None:
-                return None
-            if isinstance(x, str):
-                words = [x.lower()]
+        # normalize & spell-correct category if provided
+        category_corr = None
+        if category:
+            if isinstance(category, str):
+                category_list = [category]
             else:
-                words = [str(v).lower() for v in x]
-
-            # 🔹 Apply spell correction on brand/category tokens too
-            if do_correct:
-                return [self.corrector.correct_word(w).lower() for w in words]
-            return words
-
-        brand_list = norm_list(brand)
-        category_list = norm_list(category)
+                category_list = list(category)
+            category_corr = [self.corrector.correct_word(c.lower()) for c in category_list]
+            if category_corr != category_list:
+                print(f"[SpellCorrector] Category corrections: {category_list} → {category_corr}")
 
         out = []
         for p in products:
-            if brand_list:
-                pb = str(p.get("brand", "")).lower()
-                if pb not in brand_list:
-                    continue
-            if category_list:
-                pc = str(p.get("category", "")).lower()
-                if pc not in category_list:
-                    continue
+            # Stars filter
+            stars = p.get("stars")
+            if stars_min is not None and stars is not None and stars < stars_min:
+                continue
+            if stars_max is not None and stars is not None and stars > stars_max:
+                continue
+
+            # Price filter
             price = p.get("price")
             if price_min is not None and price is not None and price < price_min:
                 continue
             if price_max is not None and price is not None and price > price_max:
                 continue
+
+            # Bestseller filter
+            is_best = p.get("isBestSeller")
+            if bestseller is not None and is_best != bestseller:
+                continue
+
+            # Category filter
+            p_cat = p.get("category_name", "").lower()
+            if category_corr and p_cat not in category_corr:
+                continue
+
             out.append(p)
-        return out
+
+        corrected_filters = {}
+        if stars_min is not None:
+            corrected_filters["stars_min"] = stars_min
+        if stars_max is not None:
+            corrected_filters["stars_max"] = stars_max
+        if price_min is not None:
+            corrected_filters["price_min"] = price_min
+        if price_max is not None:
+            corrected_filters["price_max"] = price_max
+        if bestseller is not None:
+            corrected_filters["isBestSeller"] = bestseller
+        if category_corr:
+            corrected_filters["category_name"] = category_corr
+
+        return out, corrected_filters
+    
+

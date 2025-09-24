@@ -38,3 +38,23 @@ build/
 .coverage
 htmlcov/
 .pytest_cache/
+
+# Ignore datasets
+*.csv
+*.pkl
+*.json
+*.parquet
+
+# Ignore embeddings and FAISS indexes
+*.npy
+*.faiss
+*.index
+
+# Ignore large checkpoints
+*.pt
+*.bin
+*.h5
+
+
+# Ignore local junk
+__pycache__/
