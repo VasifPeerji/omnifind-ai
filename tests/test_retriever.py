@@ -1,5 +1,5 @@
 import pytest
-from src.omnifind import retrieval
+from omnifind import retrieval
 
 
 # Fake retriever that mimics the interface of RetrieverService

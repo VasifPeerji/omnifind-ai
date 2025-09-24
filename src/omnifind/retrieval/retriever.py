@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 import numpy as np
 import faiss
-from ..utils.spell_corrector import SpellCorrector
+from omnifind.utils.spell_corrector import SpellCorrector
 from omnifind.embeddings.preprocess_texts import clean_text
 from sentence_transformers import SentenceTransformer
 
