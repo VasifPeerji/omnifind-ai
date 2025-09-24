@@ -27,7 +27,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 4️⃣ Run tests with proper PYTHONPATH
+      # 4️⃣ Download NLTK data
+      - name: Download NLTK data
+        run: |
+          python -m nltk.downloader punkt stopwords wordnet
+
+      # 5️⃣ Run tests with proper PYTHONPATH
       - name: Run tests
         env:
           PYTHONPATH: src    # Important: points to src/ for absolute imports
