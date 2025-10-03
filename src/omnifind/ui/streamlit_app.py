@@ -8,13 +8,13 @@ API_BASE = "http://localhost:8000"
 
 # ---------- Sidebar ----------
 with st.sidebar:
-    st.header('Search')
+    st.header('Search Options')
     mode = st.radio('Mode', ['Text', 'Image'])
     top_k = st.number_input('Top K', min_value=1, max_value=20, value=5, step=1)
 
     st.markdown("---")
     st.subheader("Filters (optional)")
-    category = st.text_input("Category (exact, or comma-separated)")
+    category = st.text_input("Category (exact or comma-separated)")
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -39,15 +39,13 @@ def parse_multi(text):
     parts = [p.strip() for p in text.split(",") if p.strip()]
     if not parts:
         return None
-    if len(parts) == 1:
-        return parts[0]
-    return parts
+    return parts[0] if len(parts) == 1 else parts
 
 
 # ---------- Main ----------
 if mode == 'Text':
     q = st.text_input('Enter search query (e.g., "white cotton shirt")')
-    if st.button('Search'):
+    if st.button('Search') and q.strip():
         filters = {
             "category_name": parse_multi(category),
             "price_min": price_min if price_min > 0 else None,
@@ -61,6 +59,7 @@ if mode == 'Text':
             "top_k": int(top_k),
             "filters": filters
         }
+
         try:
             resp = requests.post(f"{API_BASE}/search/text", json=payload, timeout=15)
             if resp.ok:
@@ -98,15 +97,16 @@ if mode == 'Text':
                         col1, col2 = st.columns([1, 3])
                         with col1:
                             if p.get("imgUrl"):
-                                st.image(p.get("imgUrl"), use_column_width=True)
+                                st.image(p.get("imgUrl"), width=250)  # or any desired pixel width
+
                         with col2:
                             st.subheader(p.get("title", "Unknown Product"))
                             st.caption(f"Category: {p.get('category_name', 'N/A')}")
                             price_usd = p.get("price", 0)
-                            price_inr = price_usd * 85 if isinstance(price_usd, (int, float)) else "N/A"
-                            st.write(f"💲 {price_usd} USD  |  ₹ {price_inr} INR")
+                            price_inr = round(price_usd * 85, 2) if isinstance(price_usd, (int, float)) else "N/A"
+                            st.markdown(f"💲 **{price_usd} USD**  |  ₹ **{price_inr} INR**")
                             if p.get("url"):
-                                st.markdown(f"[🔗 View on Amazon]({p.get('url')})")
+                                st.markdown(f"[🔗 View on Amazon]({p.get('url')})", unsafe_allow_html=True)
                         st.markdown("---")
             else:
                 st.error(f"Backend error: {resp.status_code} {resp.text}")

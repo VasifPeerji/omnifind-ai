@@ -7,7 +7,7 @@ from typing import Optional, List, Union
 
 from ..retrieval.retriever import RetrieverService
 
-
+# ---------------------- Schemas ----------------------
 class TextFilters(BaseModel):
     brand: Optional[Union[str, List[str]]] = None
     category: Optional[Union[str, List[str]]] = None
@@ -19,11 +19,15 @@ class TextSearchRequest(BaseModel):
     top_k: int = 5
     filters: Optional[TextFilters] = None
 
-
+# ---------------------- Factory ----------------------
 def create_app(retriever: RetrieverService = None) -> FastAPI:
-    """Factory to create FastAPI app, inject retriever for testing."""
+    """
+    Factory to create FastAPI app.
+    Allows injecting a custom retriever for testing.
+    """
     app = FastAPI(title='OmniFind AI API')
 
+    # CORS middleware for frontend access
     app.add_middleware(
         CORSMiddleware,
         allow_origins=['*'],
@@ -35,15 +39,16 @@ def create_app(retriever: RetrieverService = None) -> FastAPI:
     if retriever is None:
         retriever = RetrieverService()
 
+    # ---------- Health check ----------
     @app.get('/')
     def read_root():
         return {'message': 'OmniFind AI backend is running'}
 
+    # ---------- Text search ----------
     @app.post('/search/text')
     def search_text(req: TextSearchRequest):
         filters = req.filters.dict() if req.filters else {}
 
-        # retriever now returns (results, corrected_query, corrected_filters)
         results, corrected_query, corrected_filters = retriever.search_text(
             req.query, top_k=req.top_k, filters=filters
         )
@@ -56,3 +61,7 @@ def create_app(retriever: RetrieverService = None) -> FastAPI:
         }
 
     return app
+
+# ---------------------- Uvicorn entry ----------------------
+# Expose a top-level 'app' for Uvicorn
+app = create_app()
