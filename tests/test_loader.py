@@ -1,5 +1,5 @@
 import pytest
-from omnifind.data import loader
+from omnifind.prepare_data import loader
 
 
 def test_loader_returns_list(monkeypatch):

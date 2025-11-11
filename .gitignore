@@ -19,6 +19,7 @@ env/
 
 # Data & models
 data/*
+src/data/
 !data/sample_products.json   # keep demo file
 models/
 outputs/

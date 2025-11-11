@@ -26,16 +26,32 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install faiss-cpu
+          pip install faiss-cpu  # CPU version for CI
+          pip install pytest  # Ensure pytest is installed
 
-      # 4️⃣ Download NLTK data
+      # 4️⃣ Download NLTK data (needed by preprocess_texts.py)
       - name: Download NLTK data
         run: |
-          python -m nltk.downloader punkt stopwords wordnet
+          python -c "
+          import nltk
+          nltk.download('punkt', quiet=True)
+          nltk.download('averaged_perceptron_tagger', quiet=True)
+          nltk.download('wordnet', quiet=True)
+          nltk.download('omw-1.4', quiet=True)
+          "
 
       # 5️⃣ Run tests with proper PYTHONPATH
       - name: Run tests
         env:
-          PYTHONPATH: src    # Important: points to src/ for absolute imports
+          PYTHONPATH: src              # Points to src/ for absolute imports
+          OMNIFIND_TEST: "1"           # Use test mode (dummy retriever)
+          USE_HYBRID: "0"              # Disable hybrid retriever in tests
         run: |
-          pytest -v tests --maxfail=1 --disable-warnings
+          pytest -v tests/ --maxfail=1 --disable-warnings --tb=short
+
+      # 6️⃣ Optional: Code coverage
+      - name: Generate coverage report
+        if: always()  # Run even if tests fail
+        run: |
+          pip install pytest-cov
+          pytest tests/ --cov=src/omnifind --cov-report=term-missing

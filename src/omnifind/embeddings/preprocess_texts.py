@@ -364,8 +364,8 @@ def clean_text(text: Optional[str]) -> str:
     filtered2 = []
     for t in filtered:
         if _SKU_LIKE_RE.fullmatch(t) and len(t) >= 8 and any(ch.isalpha() for ch in t) and any(ch.isdigit() for ch in t):
-            # drop probable SKU/model tokens
-            continue
+            if not (len(t) == 10 and t.upper().startswith("B")):
+                continue
         filtered2.append(t)
 
     # 13. Lemmatize with POS tags (helps small gains in matching)

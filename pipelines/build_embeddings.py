@@ -1,6 +1,6 @@
 # Simple script to compute embeddings for the sample catalog and persist them.
 from src.omnifind.embeddings.embedder import Embedder
-from src.omnifind.data.loader import load_sample_catalog
+from src.omnifind.prepare_data.loader import load_sample_catalog
 import numpy as np
 import json
 from pathlib import Path
