@@ -1,15 +1,13 @@
 # src/omnifind/api/main.py
 """
 Production FastAPI with:
-- Hybrid retriever (FAISS + BM25)
+- Hybrid retriever v3 (FAISS + BM25 + Query Understanding)
 - Image search (CLIP-based)
-- Backward compatibility with old RetrieverService
+- Backward compatibility
 - Automatic price extraction
 - Query logging & metrics
-- Health checks
-- Environment-based config
 """
-from fastapi import FastAPI, HTTPException, File, UploadFile  # ← ADD File, UploadFile
+from fastapi import FastAPI, HTTPException, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List, Union, Dict, Any
@@ -17,8 +15,8 @@ import time
 import logging
 import os
 from datetime import datetime
-from PIL import Image  # ← ADD
-import io  # ← ADD
+from PIL import Image
+import io
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -27,8 +25,8 @@ logger = logging.getLogger(__name__)
 # ---------------------- Schemas ----------------------
 class TextFilters(BaseModel):
     category_name: Optional[Union[str, List[str]]] = None
-    brand: Optional[Union[str, List[str]]] = None  # Keep for backward compatibility
-    category: Optional[Union[str, List[str]]] = None  # Alias for category_name
+    brand: Optional[Union[str, List[str]]] = None
+    category: Optional[Union[str, List[str]]] = None
     price_min: Optional[float] = None
     price_max: Optional[float] = None
     stars_min: Optional[float] = None
@@ -39,13 +37,14 @@ class TextSearchRequest(BaseModel):
     query: str = Field(..., description="Natural language query", min_length=1)
     top_k: int = Field(default=5, ge=1, le=50)
     filters: Optional[TextFilters] = None
+    # NOTE: alpha is now dynamic per query, but kept for backward compatibility
     alpha: Optional[float] = Field(default=None, ge=0.0, le=1.0,
-                                   description="Fusion weight (0=BM25, 1=FAISS, hybrid only)")
+                                   description="[Ignored in v3] Alpha is now auto-determined by query type")
 
 class TextSearchResponse(BaseModel):
     query: str
     corrected_query: str
-    corrected_filters: Dict[str, Any]  # Keep old name for compatibility
+    corrected_filters: Dict[str, Any]
     results: List[Dict[str, Any]]
     latency_ms: Optional[float] = None
     count: Optional[int] = None
@@ -59,7 +58,6 @@ class HealthResponse(BaseModel):
     retriever_type: str
     version: str
 
-# ← ADD: Schema for visual-text search
 class VisualTextSearchRequest(BaseModel):
     text: str = Field(..., description="Text description for visual search", min_length=1)
     top_k: int = Field(default=5, ge=1, le=50)
@@ -72,14 +70,14 @@ def create_app(retriever=None) -> FastAPI:
     Factory to create FastAPI app with configurable retriever.
     
     Env vars:
-        USE_HYBRID=1 (default) - Use HybridRetriever (FAISS + BM25)
+        USE_HYBRID=1 (default) - Use HybridRetriever v3
         USE_HYBRID=0 - Use old RetrieverService (FAISS only)
         OMNIFIND_TEST=1 - Use dummy retriever for testing
     """
     app = FastAPI(
-        title='OmniFind AI - Production API',
-        description='FAANG-grade product search with hybrid retrieval + image search',
-        version='2.0.0'
+        title='OmniFind AI - Production API v3',
+        description='Amazon-level product search with query understanding',
+        version='3.0.0'
     )
     
     # CORS
@@ -103,35 +101,45 @@ def create_app(retriever=None) -> FastAPI:
             retriever_type = "dummy"
         
         else:
-            # Production mode - choose retriever based on env
+            # Production mode - use v3 retriever
             use_hybrid = os.getenv("USE_HYBRID", "1") == "1"
             
             if use_hybrid:
                 try:
+                    # ✅ FIX: Import v3 retriever (or your actual file name)
                     from ..retrieval.hybrid_retriever import HybridRetriever
-                    logger.info("🚀 Initializing HybridRetriever (FAISS + BM25)...")
+                    # If you saved as hybrid_retriever_v3.py:
+                    # from ..retrieval.hybrid_retriever_v3 import HybridRetriever
+                    
+                    logger.info("🚀 Initializing HybridRetriever v3 (Query Understanding)...")
+                    
+                    # ✅ FIX: Use correct parameter name 'default_alpha' (not 'alpha')
                     retriever = HybridRetriever(
-                        alpha=float(os.getenv("ALPHA", "0.6")),
-                        use_reranker=os.getenv("USE_RERANKER", "0") == "1",
+                        model_name=os.getenv("MODEL_NAME", "BAAI/bge-large-en-v1.5"),
                         use_gpu=os.getenv("USE_GPU", "1") == "1",
+                        default_alpha=float(os.getenv("DEFAULT_ALPHA", "0.6")),  # ← FIXED
+                        use_reranker=os.getenv("USE_RERANKER", "0") == "1",
                         ef_search=int(os.getenv("EF_SEARCH", "256")),
                     )
-                    retriever_type = "hybrid_faiss_bm25"
-                    logger.info(f"✅ HybridRetriever ready: {len(retriever.products):,} products")
+                    retriever_type = "hybrid_v3_query_understanding"
+                    logger.info(f"✅ HybridRetriever v3 ready: {len(retriever.products):,} products")
                 
                 except FileNotFoundError as e:
-                    logger.error(f"❌ Missing BM25 corpus: {e}")
-                    logger.info("⚠️  Falling back to RetrieverService (FAISS only)")
-                    from ..retrieval.retriever import RetrieverService
-                    retriever = RetrieverService()
-                    retriever_type = "faiss_only"
+                    logger.error(f"❌ Missing required files: {e}")
+                    logger.info("⚠️  Run: python -m omnifind.embeddings.embedder --rebuild-index-only")
+                    raise
+                
+                except ImportError as e:
+                    logger.error(f"❌ Missing dependencies: {e}")
+                    logger.info("⚠️  Install: pip install rapidfuzz")
+                    raise
                 
                 except Exception as e:
                     logger.error(f"❌ Failed to load HybridRetriever: {e}")
                     raise
             
             else:
-                # Explicitly use old retriever
+                # Explicitly use old retriever (fallback)
                 logger.info("🔧 Using RetrieverService (FAISS only)")
                 from ..retrieval.retriever import RetrieverService
                 retriever = RetrieverService()
@@ -155,11 +163,11 @@ def create_app(retriever=None) -> FastAPI:
         """Health check with system info."""
         return {
             "status": "healthy",
-            "message": "OmniFind AI backend is running",
+            "message": "OmniFind AI v3 backend is running",
             "timestamp": datetime.utcnow().isoformat(),
             "num_products": len(retriever.products) if hasattr(retriever, 'products') else 0,
             "retriever_type": app.state.retriever_type,
-            "version": "2.0.0"
+            "version": "3.0.0"
         }
     
     @app.get("/metrics")
@@ -178,13 +186,20 @@ def create_app(retriever=None) -> FastAPI:
     @app.post("/search/text", response_model=TextSearchResponse)
     def search_text(req: TextSearchRequest):
         """
-        Hybrid search endpoint with automatic price extraction.
+        Intelligent search with query understanding (v3).
+        
+        Features:
+        - Auto-detects ASINs (e.g., "B0979NG867")
+        - Extracts brands (e.g., "nike", "adidas")
+        - Extracts colors (e.g., "red", "black")
+        - Dynamic alpha based on query type
+        - Conservative spell correction
         
         Example queries:
-        - "nike running shoes"
-        - "cheap watches under $50" (auto-extracts price_max=50)
-        - "B0979NG867" (ASIN lookup, hybrid only)
-        - "boys dinosaur jacket navy blue"
+        - "nike running shoes" → brand filter + keyword-heavy search
+        - "B0979NG867" → exact ASIN match
+        - "red dress women" → color + gender filter
+        - "cheap watches under $50" → auto price extraction
         """
         t0 = time.time()
         search_count["total"] += 1
@@ -207,26 +222,31 @@ def create_app(retriever=None) -> FastAPI:
                     if key in filter_dict:
                         filters[key] = filter_dict[key]
             
-            # Search with retriever
-            search_kwargs = {"query": req.query, "top_k": req.top_k, "filters": filters}
-            
-            # Add hybrid-specific params if available
-            if hasattr(retriever, 'alpha') and req.alpha is not None:
-                search_kwargs["alpha"] = req.alpha
-            
-            results, corrected_query, corrected_filters = retriever.search_text(**search_kwargs)
+            # ✅ FIX: V3 retriever doesn't use 'alpha' parameter
+            # Alpha is now determined automatically by query type
+            results, corrected_query, corrected_filters = retriever.search_text(
+                query=req.query,
+                top_k=req.top_k,
+                filters=filters
+            )
             
             latency_ms = (time.time() - t0) * 1000
             search_count["total_latency_ms"] += latency_ms
             
-            # Log
-            logger.info({
+            # Log with query intent info if available
+            log_data = {
                 "query": req.query,
                 "corrected": corrected_query,
                 "results": len(results),
                 "latency_ms": f"{latency_ms:.1f}",
                 "filters": corrected_filters,
-            })
+            }
+            
+            # Add match type from results if available
+            if results and "_match_type" in results[0]:
+                log_data["match_type"] = results[0]["_match_type"]
+            
+            logger.info(log_data)
             
             return {
                 "query": req.query,
@@ -252,11 +272,9 @@ def create_app(retriever=None) -> FastAPI:
     ):
         """
         Search by uploaded image (Google Lens style).
-        
-        Upload a product image and get visually similar products.
         """
         try:
-            # Load image retriever (lazy initialization)
+            # Lazy load image retriever
             if not hasattr(app.state, 'image_retriever'):
                 from ..retrieval.image_retriever import ImageRetriever
                 logger.info("📸 Initializing ImageRetriever...")
@@ -266,7 +284,7 @@ def create_app(retriever=None) -> FastAPI:
             contents = await file.read()
             image = Image.open(io.BytesIO(contents)).convert("RGB")
             
-            # Search
+            # Build filters
             filters = {}
             if price_min:
                 filters["price_min"] = price_min
@@ -293,11 +311,11 @@ def create_app(retriever=None) -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/search/visual-text")
-    def search_visual_text(req: VisualTextSearchRequest):  # ← Use Pydantic model
+    def search_visual_text(req: VisualTextSearchRequest):
         """
         Text-to-image search using CLIP.
         
-        Example: "red evening dress" returns visually matching products
+        Example: "red evening dress" → visually matching products
         """
         try:
             if not hasattr(app.state, 'image_retriever'):

@@ -164,28 +164,41 @@ def make_enhanced_text(prod: Dict[str, Any], include_asin: bool = False) -> str:
     return " ".join(parts)
 
 def make_bm25_text(prod: Dict[str, Any]) -> str:
-    """Simple text for BM25 (no repetition)."""
+    """
+    Enhanced BM25 corpus with brand, color, ASIN for exact matching.
+    NO repetition in semantic embeddings, but strategic repetition here.
+    """
     parts = []
     
+    # Title (cleaned) - single occurrence
     title = clean_text(prod.get("title", ""))
     if title:
         parts.append(title)
     
+    # ASIN (critical for exact match) - TRIPLE repetition for boosting
     asin = prod.get("asin", "")
     if asin:
-        parts.append(str(asin))
+        parts.extend([str(asin)] * 3)  # 3x weight for ASIN exact matching
     
+    # Category - single occurrence
     cat = clean_text(prod.get("category_name", ""))
     if cat:
         parts.append(cat)
     
-    brand = extract_brand(prod.get("title", ""))
+    # Brand (extract and repeat 2x for importance)
+    brand = extract_brand(title)
     if brand:
-        parts.append(brand)
+        parts.extend([brand] * 2)
+    
+    # Colors (extract from title and repeat 2x)
+    colors = extract_colors(title)
+    if colors:
+        parts.extend(colors * 2)  # 2x weight for color matching
     
     # CRITICAL: Return fallback if empty
     result = " ".join(parts).strip()
-    return result if result else "unknown product"  # ← ADD THIS
+    return result if result else "unknown product"
+
 
 # ==== Product Loading ====
 def load_products(path: str) -> List[Dict[str, Any]]:
@@ -427,7 +440,6 @@ def main(args):
     try:
         if faiss.get_num_gpus() > 0:
             index = faiss.index_gpu_to_cpu(index)
-            import torch
             torch.cuda.empty_cache()  # Free VRAM
         
         faiss.write_index(index, str(INDEX_FILE))
