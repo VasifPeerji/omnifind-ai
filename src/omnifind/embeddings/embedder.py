@@ -278,7 +278,7 @@ def main(args):
             texts = [f"passage: {make_enhanced_text(p)}" for p in products]
         else:
             print("📝 Generating enhanced texts for BGE model (no prefix)...")
-            texts = [make_enhanced_text(p) for p in products]  # NO PREFIX for BGE!
+            texts = [make_enhanced_text(p) for p in products]  # NO PREFIX for BGE
 
         # Load model
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -427,6 +427,8 @@ def main(args):
     try:
         if faiss.get_num_gpus() > 0:
             index = faiss.index_gpu_to_cpu(index)
+            import torch
+            torch.cuda.empty_cache()  # Free VRAM
         
         faiss.write_index(index, str(INDEX_FILE))
         print(f"✅ Saved: {INDEX_FILE}")

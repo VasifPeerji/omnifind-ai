@@ -30,8 +30,13 @@ INDEX_FILE = BASE_DIR / "data/embeddings/faiss_index.index"
 BM25_FILE = BASE_DIR / "data/embeddings/bm25_corpus.pkl"
 
 # Price extraction pattern
-PRICE_PATTERN = re.compile(r'under\s*\$?(\d+)|less\s*than\s*\$?(\d+)|below\s*\$?(\d+)', re.I)
-
+PRICE_PATTERN = re.compile(
+    r'under\s*[$₹]?(\d+)|'
+    r'less\s*than\s*[$₹]?(\d+)|'
+    r'below\s*[$₹]?(\d+)|'
+    r'under\s*rs\.?\s*(\d+)', 
+    re.I
+)
 class HybridRetriever:
     def __init__(
         self,
@@ -66,6 +71,10 @@ class HybridRetriever:
         
         # Encoder
         device = "cuda" if (use_gpu and self._cuda_available()) else "cpu"
+        if device == "cuda":
+            import torch
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
         self.model = SentenceTransformer(model_name, device=device)
          # === ADD BGE OPTIMIZATIONS ===
         if "bge" in model_name.lower() and device == "cuda":
