@@ -2,7 +2,7 @@ from sentence_transformers import SentenceTransformer, InputExample, losses, Sen
 from torch.utils.data import DataLoader
 
 
-model = SentenceTransformer("intfloat/e5-base-v2")
+model = SentenceTransformer("BAAI/bge-large-en-v1.5")
 
 train_examples = [
     # Positive pairs (label=1.0)

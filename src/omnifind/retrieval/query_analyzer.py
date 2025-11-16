@@ -31,17 +31,25 @@ class QueryAnalyzer:
     Analyzes queries to extract structured info and determine search strategy.
     """
     
-    # Extended brand patterns (case-insensitive)
+    # Extended brand patterns (FASHION-SPECIFIC for your dataset)
     BRANDS = {
+        # Athletic/Sportswear
         'nike', 'adidas', 'puma', 'reebok', 'under armour', 'new balance',
-        'asics', 'skechers', 'fila', 'converse', 'vans',
+        'asics', 'skechers', 'fila', 'converse', 'vans', 'champion',
+        # Casual/Fast Fashion
         'levi', 'levis', "levi's", 'wrangler', 'lee', 'gap', 'old navy',
-        'zara', 'h&m', 'hm', 'uniqlo', 'forever 21',
+        'zara', 'h&m', 'hm', 'uniqlo', 'forever 21', 'mango', 'guess',
+        # Premium/Designer
         'calvin klein', 'tommy hilfiger', 'ralph lauren', 'polo',
-        'north face', 'columbia', 'patagonia', 'carhartt',
-        'gucci', 'prada', 'versace', 'dior', 'chanel',
-        'apple', 'samsung', 'sony', 'lg', 'dell', 'hp', 'lenovo',
-        'casio', 'fossil', 'timex', 'seiko', 'citizen'
+        'armani', 'versace', 'gucci', 'prada', 'diesel',
+        # Outdoor/Workwear
+        'north face', 'columbia', 'patagonia', 'carhartt', 'timberland', 'dickies',
+        # Footwear Specialists
+        'dr martens', 'clarks', 'crocs', 'birkenstock',
+        # Watches & Accessories
+        'casio', 'fossil', 'timex', 'seiko', 'citizen', 'michael kors', 'skagen', 'bulova',
+        # Plus common misspellings
+        'addidas', 'calvinklein', 'tommyhilfiger', 'ralphlauren',
     }
     
     # Colors with common misspellings
@@ -94,6 +102,10 @@ class QueryAnalyzer:
         )
     
     def analyze(self, query: str) -> QueryIntent:
+        """
+        Main analysis function.
+        Returns structured query intent with optimal search strategy.
+        """
         query = query.strip()
         
         # Check for ASIN (exact match takes priority)
@@ -103,8 +115,8 @@ class QueryAnalyzer:
                 original=query,
                 clean_query=asin_match.group(1).upper(),
                 query_type='asin',
-                search_strategy='exact',
-                alpha=0.0,
+                search_strategy='exact',  # Use BM25 only
+                alpha=0.0,  # 100% keyword search
                 attributes={'asin': asin_match.group(1).upper()}
             )
         
@@ -115,16 +127,13 @@ class QueryAnalyzer:
         size = self._extract_size(query)
         material = self._extract_material(query)
         
-        # Build clean query - KEEP BRAND IN QUERY but reduce its weight
+        # Build clean query - KEEP brand in query for semantic understanding
         clean_query = query.lower()
         
-        # For branded queries, we want to keep the brand in the query
-        # but use brand filtering to ensure relevance
-        if brand:
-            # Don't remove brand from query, but we'll use brand index for pre-filtering
-            # This allows semantic search to understand brand context
-            # while ensuring brand filtering happens
-            pass
+        # CRITICAL FIX: Don't remove brand from query!
+        # Brand pre-filtering handles ensuring correct brand
+        # Keeping brand in query helps semantic search understand context
+        # Example: "converse shoes" needs "converse" for proper embeddings
         
         # Determine query type and strategy
         attributes = {}
@@ -139,30 +148,31 @@ class QueryAnalyzer:
         if material:
             attributes['material'] = material
         
-        # Enhanced query classification with brand-aware strategies
-        if brand and (colors or gender or "shoes" in clean_query or "sneaker" in clean_query):
-            query_type = 'branded_specific'
-            search_strategy = 'hybrid_brand_focused'
-            alpha = 0.4  # Slightly more semantic for brand+context
+        # Enhanced query classification
+        # FIXED: Better alpha values for brand queries
+        if brand and (colors or gender):
+            query_type = 'attributed'
+            search_strategy = 'hybrid'
+            alpha = 0.45  # Balanced: brand filter + semantic product matching
         elif brand:
-            query_type = 'branded_generic'
-            search_strategy = 'keyword_brand_heavy'
-            alpha = 0.2  # Very keyword-heavy for pure brand queries
+            query_type = 'branded'
+            search_strategy = 'hybrid'
+            alpha = 0.5  # FIXED: More semantic for brand-only queries
         elif colors or gender or size:
             query_type = 'attributed'
             search_strategy = 'hybrid'
-            alpha = 0.5
+            alpha = 0.5  # Balanced
         else:
             query_type = 'generic'
             search_strategy = 'semantic'
-            alpha = 0.7
+            alpha = 0.7  # 70% semantic, 30% keyword
         
-        # Clean up query (remove extra spaces)
+        # Clean up query (only whitespace, keep all words)
         clean_query = re.sub(r'\s+', ' ', clean_query).strip()
         
         return QueryIntent(
             original=query,
-            clean_query=clean_query,
+            clean_query=clean_query if clean_query else query.lower(),
             query_type=query_type,
             brand=brand,
             colors=colors,

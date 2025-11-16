@@ -1,10 +1,10 @@
-# src/omnifind/api/main.py
 """
 Production FastAPI with:
 - Hybrid retriever v3 (FAISS + BM25 + Query Understanding)
-- Image search (CLIP-based)
+- Production-optimized image search (CLIP ViT-L/14 + TTA)
+- Text-to-image search (visual semantic search)
+- Hybrid image+text search
 - Backward compatibility
-- Automatic price extraction
 - Query logging & metrics
 """
 from fastapi import FastAPI, HTTPException, File, UploadFile
@@ -37,7 +37,6 @@ class TextSearchRequest(BaseModel):
     query: str = Field(..., description="Natural language query", min_length=1)
     top_k: int = Field(default=5, ge=1, le=50)
     filters: Optional[TextFilters] = None
-    # NOTE: alpha is now dynamic per query, but kept for backward compatibility
     alpha: Optional[float] = Field(default=None, ge=0.0, le=1.0,
                                    description="[Ignored in v3] Alpha is now auto-determined by query type")
 
@@ -56,11 +55,22 @@ class HealthResponse(BaseModel):
     timestamp: str
     num_products: int
     retriever_type: str
+    visual_search_available: bool
     version: str
 
 class VisualTextSearchRequest(BaseModel):
     text: str = Field(..., description="Text description for visual search", min_length=1)
     top_k: int = Field(default=5, ge=1, le=50)
+    price_min: Optional[float] = None
+    price_max: Optional[float] = None
+    category_name: Optional[str] = None
+    stars_min: Optional[float] = None
+
+class HybridVisualSearchRequest(BaseModel):
+    text: str = Field(..., description="Text description to combine with image")
+    top_k: int = Field(default=5, ge=1, le=50)
+    alpha: float = Field(default=0.5, ge=0.0, le=1.0, 
+                        description="Weight for image (0.5 = equal image+text)")
     price_min: Optional[float] = None
     price_max: Optional[float] = None
 
@@ -73,10 +83,13 @@ def create_app(retriever=None) -> FastAPI:
         USE_HYBRID=1 (default) - Use HybridRetriever v3
         USE_HYBRID=0 - Use old RetrieverService (FAISS only)
         OMNIFIND_TEST=1 - Use dummy retriever for testing
+        ENABLE_IMAGE_SEARCH=1 - Enable visual search (requires image index)
+        ENABLE_TTA=1 - Enable Test-Time Augmentation for image queries
+        ENABLE_RERANKING=0 - Enable cross-encoder re-ranking
     """
     app = FastAPI(
         title='OmniFind AI - Production API v3',
-        description='Amazon-level product search with query understanding',
+        description='Amazon-level product search with query understanding + visual search',
         version='3.0.0'
     )
     
@@ -88,7 +101,7 @@ def create_app(retriever=None) -> FastAPI:
         allow_headers=['*'],
     )
     
-    # ---------------------- Initialize Retriever ----------------------
+    # ---------------------- Initialize Text Retriever ----------------------
     if retriever is None:
         if os.getenv("OMNIFIND_TEST", "0") == "1":
             # Test mode - dummy retriever
@@ -106,18 +119,14 @@ def create_app(retriever=None) -> FastAPI:
             
             if use_hybrid:
                 try:
-                    # ✅ FIX: Import v3 retriever (or your actual file name)
                     from ..retrieval.hybrid_retriever import HybridRetriever
-                    # If you saved as hybrid_retriever_v3.py:
-                    # from ..retrieval.hybrid_retriever_v3 import HybridRetriever
                     
                     logger.info("🚀 Initializing HybridRetriever v3 (Query Understanding)...")
                     
-                    # ✅ FIX: Use correct parameter name 'default_alpha' (not 'alpha')
                     retriever = HybridRetriever(
                         model_name=os.getenv("MODEL_NAME", "BAAI/bge-large-en-v1.5"),
                         use_gpu=os.getenv("USE_GPU", "1") == "1",
-                        default_alpha=float(os.getenv("DEFAULT_ALPHA", "0.6")),  # ← FIXED
+                        default_alpha=float(os.getenv("DEFAULT_ALPHA", "0.6")),
                         use_reranker=os.getenv("USE_RERANKER", "0") == "1",
                         ef_search=int(os.getenv("EF_SEARCH", "256")),
                     )
@@ -154,19 +163,78 @@ def create_app(retriever=None) -> FastAPI:
     app.state.retriever_type = retriever_type
     
     # Metrics
-    search_count = {"total": 0, "errors": 0, "total_latency_ms": 0}
+    search_count = {
+        "total": 0, 
+        "errors": 0, 
+        "total_latency_ms": 0,
+        "text_searches": 0,
+        "image_searches": 0,
+        "visual_text_searches": 0,
+        "hybrid_searches": 0,
+    }
+    
+    # ---------------------- Initialize Image Retriever (Lazy) ----------------------
+    def get_image_retriever():
+        """Lazy load image retriever with production settings"""
+        if not hasattr(app.state, 'image_retriever'):
+            try:
+                from ..retrieval.image_retriever import ImageRetriever
+                
+                logger.info("📸 Initializing Production ImageRetriever...")
+                
+                enable_tta = os.getenv("ENABLE_TTA", "1") == "1"
+                enable_reranking = os.getenv("ENABLE_RERANKING", "0") == "1"
+                
+                app.state.image_retriever = ImageRetriever(
+                    model_name="clip-ViT-L-14",  # Production model
+                    use_gpu=os.getenv("USE_GPU", "1") == "1",
+                    use_fp16=True,
+                    enable_tta=enable_tta,
+                    enable_reranking=enable_reranking,
+                    cache_size=1000,
+                )
+                
+                logger.info(f"✅ ImageRetriever ready: {len(app.state.image_retriever.products):,} products")
+                logger.info(f"   TTA: {enable_tta} | Re-ranking: {enable_reranking}")
+                
+            except FileNotFoundError as e:
+                logger.error(f"❌ Image index not found: {e}")
+                logger.info("💡 Build image index: python -m omnifind.embeddings.image_embedder --enable-preprocessing")
+                raise HTTPException(
+                    status_code=503, 
+                    detail="Visual search not available. Image index not built."
+                )
+            except Exception as e:
+                logger.error(f"❌ Failed to load ImageRetriever: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        return app.state.image_retriever
     
     # ---------------------- Endpoints ----------------------
     
     @app.get("/", response_model=HealthResponse)
     def health_check():
         """Health check with system info."""
+        # Check if image retriever is available
+        visual_available = False
+        try:
+            if hasattr(app.state, 'image_retriever'):
+                visual_available = True
+            else:
+                # Try to check if image files exist without loading
+                from pathlib import Path
+                image_index = Path("data/embeddings/image_faiss_index.index")
+                visual_available = image_index.exists()
+        except:
+            pass
+        
         return {
             "status": "healthy",
             "message": "OmniFind AI v3 backend is running",
             "timestamp": datetime.utcnow().isoformat(),
             "num_products": len(retriever.products) if hasattr(retriever, 'products') else 0,
             "retriever_type": app.state.retriever_type,
+            "visual_search_available": visual_available,
             "version": "3.0.0"
         }
     
@@ -174,14 +242,32 @@ def create_app(retriever=None) -> FastAPI:
     def get_metrics():
         """System metrics."""
         total = max(1, search_count["total"])
-        return {
-            "searches": search_count["total"],
+        
+        metrics = {
+            "searches": {
+                "total": search_count["total"],
+                "text": search_count["text_searches"],
+                "image": search_count["image_searches"],
+                "visual_text": search_count["visual_text_searches"],
+                "hybrid": search_count["hybrid_searches"],
+            },
             "errors": search_count["errors"],
             "error_rate": search_count["errors"] / total,
             "avg_latency_ms": search_count["total_latency_ms"] / total,
             "num_products": len(retriever.products) if hasattr(retriever, 'products') else 0,
             "retriever_type": app.state.retriever_type,
         }
+        
+        # Add image retriever stats if available
+        if hasattr(app.state, 'image_retriever'):
+            img_stats = app.state.image_retriever.get_stats()
+            metrics["image_retriever"] = {
+                "cache_hit_rate": img_stats["cache_hit_rate"],
+                "tta_enabled": img_stats["tta_enabled"],
+                "reranking_enabled": img_stats["reranking_enabled"],
+            }
+        
+        return metrics
     
     @app.post("/search/text", response_model=TextSearchResponse)
     def search_text(req: TextSearchRequest):
@@ -203,9 +289,10 @@ def create_app(retriever=None) -> FastAPI:
         """
         t0 = time.time()
         search_count["total"] += 1
+        search_count["text_searches"] += 1
         
         try:
-            # Normalize filters (support both old and new field names)
+            # Normalize filters
             filters = {}
             if req.filters:
                 filter_dict = req.filters.dict(exclude_none=True)
@@ -222,8 +309,7 @@ def create_app(retriever=None) -> FastAPI:
                     if key in filter_dict:
                         filters[key] = filter_dict[key]
             
-            # ✅ FIX: V3 retriever doesn't use 'alpha' parameter
-            # Alpha is now determined automatically by query type
+            # V3 retriever - alpha is determined automatically
             results, corrected_query, corrected_filters = retriever.search_text(
                 query=req.query,
                 top_k=req.top_k,
@@ -233,7 +319,7 @@ def create_app(retriever=None) -> FastAPI:
             latency_ms = (time.time() - t0) * 1000
             search_count["total_latency_ms"] += latency_ms
             
-            # Log with query intent info if available
+            # Log with query intent info
             log_data = {
                 "query": req.query,
                 "corrected": corrected_query,
@@ -242,7 +328,6 @@ def create_app(retriever=None) -> FastAPI:
                 "filters": corrected_filters,
             }
             
-            # Add match type from results if available
             if results and "_match_type" in results[0]:
                 log_data["match_type"] = results[0]["_match_type"]
             
@@ -269,16 +354,142 @@ def create_app(retriever=None) -> FastAPI:
         top_k: int = 5,
         price_min: Optional[float] = None,
         price_max: Optional[float] = None,
+        category_name: Optional[str] = None,
+        stars_min: Optional[float] = None,
     ):
         """
         Search by uploaded image (Google Lens style).
+        
+        Features:
+        - Production CLIP ViT-L/14 model
+        - Test-Time Augmentation (TTA) for robust matching
+        - Advanced filtering
+        - Result caching
         """
+        search_count["total"] += 1
+        search_count["image_searches"] += 1
+        
         try:
-            # Lazy load image retriever
-            if not hasattr(app.state, 'image_retriever'):
-                from ..retrieval.image_retriever import ImageRetriever
-                logger.info("📸 Initializing ImageRetriever...")
-                app.state.image_retriever = ImageRetriever()
+            image_retriever = get_image_retriever()
+            
+            # Read uploaded image
+            contents = await file.read()
+            image = Image.open(io.BytesIO(contents)).convert("RGB")
+            
+            # Build filters
+            filters = {}
+            if price_min:
+                filters["price_min"] = price_min
+            if price_max:
+                filters["price_max"] = price_max
+            if category_name:
+                filters["category_name"] = category_name
+            if stars_min:
+                filters["stars_min"] = stars_min
+            
+            t0 = time.time()
+            results = image_retriever.search_by_image(
+                image, top_k=top_k, filters=filters
+            )
+            latency_ms = (time.time() - t0) * 1000
+            search_count["total_latency_ms"] += latency_ms
+            
+            logger.info(f"Image search: {len(results)} results in {latency_ms:.1f}ms")
+            
+            return {
+                "results": results,
+                "count": len(results),
+                "search_type": "image",
+                "latency_ms": latency_ms,
+                "tta_enabled": image_retriever.enable_tta,
+            }
+        
+        except HTTPException:
+            raise
+        except Exception as e:
+            search_count["errors"] += 1
+            logger.error(f"Image search failed: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/search/visual-text")
+    def search_visual_text(req: VisualTextSearchRequest):
+        """
+        Text-to-image search using CLIP (visual semantic search).
+        
+        Example: "red evening dress" → finds visually matching products
+        
+        This uses CLIP's text encoder to find products that LOOK like
+        the text description, not just keyword matching.
+        """
+        search_count["total"] += 1
+        search_count["visual_text_searches"] += 1
+        
+        try:
+            image_retriever = get_image_retriever()
+            
+            # Build filters
+            filters = {}
+            if req.price_min:
+                filters["price_min"] = req.price_min
+            if req.price_max:
+                filters["price_max"] = req.price_max
+            if req.category_name:
+                filters["category_name"] = req.category_name
+            if req.stars_min:
+                filters["stars_min"] = req.stars_min
+            
+            t0 = time.time()
+            results = image_retriever.search_by_text(
+                req.text, top_k=req.top_k, filters=filters
+            )
+            latency_ms = (time.time() - t0) * 1000
+            search_count["total_latency_ms"] += latency_ms
+            
+            logger.info(f"Visual-text search '{req.text}': {len(results)} results in {latency_ms:.1f}ms")
+            
+            return {
+                "query": req.text,
+                "results": results,
+                "count": len(results),
+                "search_type": "visual_text",
+                "latency_ms": latency_ms,
+            }
+        
+        except HTTPException:
+            raise
+        except Exception as e:
+            search_count["errors"] += 1
+            logger.error(f"Visual text search failed: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    @app.post("/search/hybrid-visual")
+    async def search_hybrid_visual(
+        file: UploadFile = File(...),
+        text: str = "",
+        top_k: int = 5,
+        alpha: float = 0.5,
+        price_min: Optional[float] = None,
+        price_max: Optional[float] = None,
+    ):
+        """
+        Hybrid image + text search.
+        
+        Combines visual similarity with text semantic matching.
+        
+        Example:
+        - Upload image of shoes + text "nike" → finds Nike shoes visually similar
+        - Upload dress image + text "formal evening" → finds formal dresses similar to image
+        
+        Args:
+            file: Image file
+            text: Text description to combine
+            alpha: Weight for image (0.5 = equal, 0.7 = 70% image / 30% text)
+        """
+        search_count["total"] += 1
+        search_count["hybrid_searches"] += 1
+        
+        try:
+            image_retriever = get_image_retriever()
             
             # Read uploaded image
             contents = await file.read()
@@ -292,62 +503,32 @@ def create_app(retriever=None) -> FastAPI:
                 filters["price_max"] = price_max
             
             t0 = time.time()
-            results = app.state.image_retriever.search_by_image(
-                image, top_k=top_k, filters=filters
+            results = image_retriever.hybrid_search(
+                image=image,
+                text=text if text.strip() else None,
+                top_k=top_k,
+                alpha=alpha,
+                filters=filters,
             )
             latency_ms = (time.time() - t0) * 1000
+            search_count["total_latency_ms"] += latency_ms
             
-            logger.info(f"Image search: {len(results)} results in {latency_ms:.1f}ms")
+            logger.info(f"Hybrid search (alpha={alpha}): {len(results)} results in {latency_ms:.1f}ms")
             
             return {
                 "results": results,
                 "count": len(results),
-                "search_type": "image",
+                "search_type": "hybrid_visual",
+                "alpha": alpha,
+                "text_query": text if text.strip() else None,
                 "latency_ms": latency_ms,
             }
         
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.error(f"Image search failed: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.post("/search/visual-text")
-    def search_visual_text(req: VisualTextSearchRequest):
-        """
-        Text-to-image search using CLIP.
-        
-        Example: "red evening dress" → visually matching products
-        """
-        try:
-            if not hasattr(app.state, 'image_retriever'):
-                from ..retrieval.image_retriever import ImageRetriever
-                logger.info("📸 Initializing ImageRetriever...")
-                app.state.image_retriever = ImageRetriever()
-            
-            # Build filters
-            filters = {}
-            if req.price_min:
-                filters["price_min"] = req.price_min
-            if req.price_max:
-                filters["price_max"] = req.price_max
-            
-            t0 = time.time()
-            results = app.state.image_retriever.search_by_text(
-                req.text, top_k=req.top_k, filters=filters
-            )
-            latency_ms = (time.time() - t0) * 1000
-            
-            logger.info(f"Visual-text search '{req.text}': {len(results)} results in {latency_ms:.1f}ms")
-            
-            return {
-                "query": req.text,
-                "results": results,
-                "count": len(results),
-                "search_type": "visual_text",
-                "latency_ms": latency_ms,
-            }
-        
-        except Exception as e:
-            logger.error(f"Visual text search failed: {e}", exc_info=True)
+            search_count["errors"] += 1
+            logger.error(f"Hybrid visual search failed: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/search/batch")
